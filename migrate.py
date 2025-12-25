@@ -9,10 +9,16 @@ output_sql = 'shi_pg.sql'
 
 def map_type(sqlite_type):
     sqlite_type = sqlite_type.upper()
-    if sqlite_type == 'BLOB':
+    if 'INT' in sqlite_type:
+        return 'INTEGER'
+    elif 'REAL' in sqlite_type or 'FLOAT' in sqlite_type or 'DOUBLE' in sqlite_type:
+        return 'REAL'
+    elif 'TEXT' in sqlite_type or 'CHAR' in sqlite_type or 'CLOB' in sqlite_type:
+        return 'TEXT'
+    elif 'BLOB' in sqlite_type:
         return 'BYTEA'
     else:
-        return 'TEXT'  # Default
+        return 'TEXT'  # Fallback for unrecognized types
 
 def escape_value(value):
     if value is None:
@@ -49,12 +55,38 @@ def migrate(direct_export=False, pg_url=None):
         cursor_sqlite.execute(f"PRAGMA table_info({table_name})")
         columns = cursor_sqlite.fetchall()
 
+        # Sample data to determine actual column types
+        cursor_sqlite.execute(f"SELECT * FROM {table_name} LIMIT 10")
+        sample_rows = cursor_sqlite.fetchall()
+        col_types = []
+        for i in range(len(columns)):
+            if not sample_rows:
+                # No data, use declared type
+                declared_type = columns[i][2]
+                col_types.append(map_type(declared_type))
+            else:
+                types_in_col = set(type(row[i]) for row in sample_rows)
+                if len(types_in_col) == 1:
+                    t = types_in_col.pop()
+                    if t == int:
+                        col_types.append('INTEGER')
+                    elif t == float:
+                        col_types.append('REAL')
+                    elif t == str:
+                        col_types.append('TEXT')
+                    elif t == bytes:
+                        col_types.append('BYTEA')
+                    else:
+                        col_types.append('TEXT')
+                else:
+                    col_types.append('TEXT')  # Mixed types
+
         # Build CREATE TABLE statement
         create_stmt = f'CREATE TABLE "{table_name}" ('
         col_defs = []
         for col in columns:
-            cid, name, type, notnull, default, pk = col
-            type_pg = map_type(type)
+            cid, name, declared_type, notnull, default, pk = col
+            type_pg = col_types[cid]
             col_def = f'"{name}" {type_pg}'
             if pk:
                 col_def += " PRIMARY KEY"
@@ -81,11 +113,12 @@ def migrate(direct_export=False, pg_url=None):
             col_names = [col[1] for col in columns]
             quoted_col_names = [f'"{n}"' for n in col_names]
             for row in rows:
-                values = [escape_value(val) for val in row]
-                insert_stmt = f'INSERT INTO "{table_name}" ({", ".join(quoted_col_names)}) VALUES ({", ".join(values)});\n'
                 if direct_export:
-                    cursor_pg.execute(insert_stmt)
+                    insert_stmt = f'INSERT INTO "{table_name}" ({", ".join(quoted_col_names)}) VALUES ({", ".join(["%s"] * len(row))})'
+                    cursor_pg.execute(insert_stmt, row)
                 else:
+                    values = [escape_value(val) for val in row]
+                    insert_stmt = f'INSERT INTO "{table_name}" ({", ".join(quoted_col_names)}) VALUES ({", ".join(values)});\n'
                     f.write(insert_stmt)
 
     if direct_export:
