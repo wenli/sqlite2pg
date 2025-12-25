@@ -1,4 +1,5 @@
 import sqlite3
+import argparse
 
 # SQLite database path
 sqlite_db = 'shi.db'
@@ -8,16 +9,8 @@ output_sql = 'shi_pg.sql'
 
 def map_type(sqlite_type):
     sqlite_type = sqlite_type.upper()
-    if sqlite_type in ['INTEGER', 'INT']:
-        return 'INTEGER'
-    elif sqlite_type in ['TEXT', 'VARCHAR', 'NVARCHAR']:
-        return 'TEXT'
-    elif sqlite_type == 'REAL':
-        return 'REAL'
-    elif sqlite_type == 'BLOB':
+    if sqlite_type == 'BLOB':
         return 'BYTEA'
-    elif sqlite_type == 'NUMERIC':
-        return 'NUMERIC'
     else:
         return 'TEXT'  # Default
 
@@ -32,60 +25,89 @@ def escape_value(value):
     else:
         return str(value)
 
-def migrate():
+def migrate(direct_export=False, pg_url=None):
     # Connect to SQLite
     conn_sqlite = sqlite3.connect(sqlite_db)
     cursor_sqlite = conn_sqlite.cursor()
 
-    with open(output_sql, 'w', encoding='utf-8') as f:
-        # Get all tables
-        cursor_sqlite.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
-        tables = cursor_sqlite.fetchall()
+    if direct_export:
+        import psycopg2
+        conn_pg = psycopg2.connect(pg_url)
+        cursor_pg = conn_pg.cursor()
+    else:
+        f = open(output_sql, 'w', encoding='utf-8')
 
-        for table in tables:
-            table_name = table[0]
-            print(f"Processing table: {table_name}")
+    # Get all tables
+    cursor_sqlite.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
+    tables = cursor_sqlite.fetchall()
 
-            # Get table info
-            cursor_sqlite.execute(f"PRAGMA table_info({table_name})")
-            columns = cursor_sqlite.fetchall()
+    for table in tables:
+        table_name = table[0]
+        print(f"Processing table: {table_name}")
 
-            # Build CREATE TABLE statement
-            create_stmt = f'CREATE TABLE "{table_name}" ('
-            col_defs = []
-            for col in columns:
-                cid, name, type, notnull, default, pk = col
-                type_pg = map_type(type)
-                col_def = f'"{name}" {type_pg}'
-                if pk and type.upper() == 'INTEGER':
-                    col_def = f'"{name}" SERIAL PRIMARY KEY'
-                else:
-                    if pk:
-                        col_def += " PRIMARY KEY"
-                if notnull:
-                    col_def += " NOT NULL"
-                if default is not None:
-                    col_def += f" DEFAULT {default}"
-                col_defs.append(col_def)
-            create_stmt += ", ".join(col_defs) + ");\n"
+        # Get table info
+        cursor_sqlite.execute(f"PRAGMA table_info({table_name})")
+        columns = cursor_sqlite.fetchall()
 
+        # Build CREATE TABLE statement
+        create_stmt = f'CREATE TABLE "{table_name}" ('
+        col_defs = []
+        for col in columns:
+            cid, name, type, notnull, default, pk = col
+            type_pg = map_type(type)
+            col_def = f'"{name}" {type_pg}'
+            if pk:
+                col_def += " PRIMARY KEY"
+            if notnull:
+                col_def += " NOT NULL"
+            if default is not None:
+                col_def += f" DEFAULT {default}"
+            col_defs.append(col_def)
+        create_stmt += ", ".join(col_defs) + ");\n"
+
+        if direct_export:
+            drop_stmt = f'DROP TABLE IF EXISTS "{table_name}";'
+            cursor_pg.execute(drop_stmt)
+            cursor_pg.execute(create_stmt)
+        else:
             f.write(create_stmt)
 
-            # Get data
-            cursor_sqlite.execute(f"SELECT * FROM {table_name}")
-            rows = cursor_sqlite.fetchall()
+        # Get data
+        cursor_sqlite.execute(f"SELECT * FROM {table_name}")
+        rows = cursor_sqlite.fetchall()
 
-            if rows:
-                # Get column names
-                col_names = [col[1] for col in columns]
-                quoted_col_names = [f'"{n}"' for n in col_names]
-                for row in rows:
-                    values = [escape_value(val) for val in row]
-                    insert_stmt = f'INSERT INTO "{table_name}" ({", ".join(quoted_col_names)}) VALUES ({", ".join(values)});\n'
+        if rows:
+            # Get column names
+            col_names = [col[1] for col in columns]
+            quoted_col_names = [f'"{n}"' for n in col_names]
+            for row in rows:
+                values = [escape_value(val) for val in row]
+                insert_stmt = f'INSERT INTO "{table_name}" ({", ".join(quoted_col_names)}) VALUES ({", ".join(values)});\n'
+                if direct_export:
+                    cursor_pg.execute(insert_stmt)
+                else:
                     f.write(insert_stmt)
 
+    if direct_export:
+        conn_pg.commit()
+        conn_pg.close()
+        print("Direct export to PostgreSQL completed")
+    else:
+        f.close()
+        print(f"SQL dump created: {output_sql}")
+
     conn_sqlite.close()
-    print(f"SQL dump created: {output_sql}")
 
 if __name__ == "__main__":
-    migrate()
+    parser = argparse.ArgumentParser(description="Migrate SQLite database to PostgreSQL")
+    parser.add_argument('--direct', action='store_true', help='Direct export to PostgreSQL')
+    parser.add_argument('--pg-url', type=str, help='PostgreSQL connection URL')
+    args = parser.parse_args()
+    #& C:/Intel/sqlite2pg/.venv/Scripts/python.exe c:/Intel/sqlite2pg/migrate.py --direct --pg-url postgresql://wenli:1qazxsw2@localhost:5432/sk_stock  
+    if args.direct:
+        if not args.pg_url:
+            print("Error: --pg-url is required when using --direct")
+            exit(1)
+        migrate(direct_export=True, pg_url=args.pg_url)
+    else:
+        migrate()
